@@ -11,10 +11,12 @@
 - ⚡ **Lightning Fast** - Native Go performance, instant startup
 - 📊 **Dashboard View** - See your progress at a glance with visual progress bars
 - 📋 **List View** - Focus mode for working through tasks one-by-one
+- ✏️  **Full CRUD** - Create, edit, delete tasks directly in the TUI
 - 🎯 **Priority System** - P0 (Critical) through P3 (Low), plus Homelab and Dev categories
 - 💾 **Simple Config** - JSON config file at `~/.todobi.conf`
 - ⌨️  **Vim Keybindings** - Navigate with j/k or arrow keys
 - 🔄 **Live Reload** - Press 'r' to reload config changes without restarting
+- 🪟 **tmux Integration** - Built-in popup support for quick task viewing
 
 ## Installation
 
@@ -43,7 +45,36 @@ todobi seed
 
 # Launch the TUI
 todobi
+
+# Or use it in a tmux popup (after setup below)
+# Press Ctrl+b then T
 ```
+
+### Tmux Popup Integration
+
+Add todobi to your tmux workflow with popup keybindings:
+
+```bash
+# Add to ~/.tmux.conf
+source-file ~/.tmux.conf.d/todobi.conf
+```
+
+Then create `~/.tmux.conf.d/todobi.conf`:
+
+```tmux
+# Main todobi popup - Ctrl+b T
+bind-key T display-popup -w 90% -h 90% -E "todobi"
+
+# Quick view - Ctrl+b Alt+t
+bind-key M-t display-popup -w 70% -h 60% -E "todobi"
+
+# Full screen - Ctrl+b W
+bind-key W display-popup -w 95% -h 95% -E "todobi"
+```
+
+Reload tmux: `tmux source-file ~/.tmux.conf`
+
+Now you can press `Ctrl+b` then `T` to instantly view your tasks in any tmux session!
 
 ## Usage
 
@@ -63,11 +94,21 @@ todobi help         # Show help
 | `↑/k` | Move up |
 | `↓/j` | Move down |
 | `enter/space` | Toggle task completion |
+| `a/n` | Add new task |
+| `e` | Edit selected task |
 | `d/x` | Delete task |
 | `tab` | Switch between dashboard/list view |
 | `r` | Reload config from disk |
 | `?` | Toggle help |
 | `q/ctrl+c` | Quit |
+
+### Task Form (when adding/editing)
+
+| Key | Action |
+|-----|--------|
+| `tab/shift+tab` | Next/previous field |
+| `enter` | Move to next field / Save (when on Save button) |
+| `esc` | Cancel and return to previous view |
 
 ## Configuration
 
@@ -157,15 +198,18 @@ I built todobi because I wanted:
 
 ## Roadmap
 
-- [ ] Add task editing in TUI (currently must edit config file)
-- [ ] Add task creation in TUI
+- [x] Add task editing in TUI
+- [x] Add task creation in TUI
+- [x] Full CRUD operations
 - [ ] Search/filter tasks
-- [ ] Task due dates
+- [ ] Task due dates and reminders
 - [ ] Recurring tasks
 - [ ] Export to markdown
-- [ ] GitHub Issues integration
-- [ ] Multiple config file support
+- [ ] GitHub Issues sync
+- [ ] Multiple config file support (projects)
 - [ ] Task templates
+- [ ] Task dependencies
+- [ ] Time tracking
 
 ## Contributing
 

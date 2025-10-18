@@ -17,7 +17,7 @@ type viewMode int
 const (
 	dashboardView viewMode = iota
 	listView
-	addTaskView
+	formView
 )
 
 type keyMap struct {
@@ -51,7 +51,7 @@ var keys = keyMap{
 	),
 	Add: key.NewBinding(
 		key.WithKeys("a", "n"),
-		key.WithHelp("a/n", "add task"),
+		key.WithHelp("a/n", "add new task"),
 	),
 	View: key.NewBinding(
 		key.WithKeys("tab"),
@@ -74,6 +74,7 @@ var keys = keyMap{
 type model struct {
 	config       *Config
 	mode         viewMode
+	prevMode     viewMode
 	cursor       int
 	width        int
 	height       int
@@ -81,6 +82,8 @@ type model struct {
 	showHelp     bool
 	statusMsg    string
 	statusExpire time.Time
+	form         formModel
+	selectedGroup int
 }
 
 type tickMsg time.Time
@@ -158,6 +161,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.config.Save()
 			}
 			return m, nil
+
+		case key.Matches(msg, keys.Add):
+			if m.mode != formView {
+				m.prevMode = m.mode
+				m.mode = formView
+				m.form = newTaskForm(nil)
+				m.selectedGroup = 1 // Default to P1
+				return m, textinput.Blink
+			}
+			return m, nil
+
+		case "e":
+			// Edit current task
+			if m.mode == listView {
+				tasks := m.getVisibleTasks()
+				if m.cursor < len(tasks) {
+					m.prevMode = m.mode
+					m.mode = formView
+					editTask := tasks[m.cursor]
+					m.form = newTaskForm(&editTask)
+					return m, textinput.Blink
+				}
+			}
+			return m, nil
+
+		case "enter":
+			if m.mode == formView {
+				if m.form.focusIndex == len(m.form.inputs) {
+					// Save button pressed
+					if task := m.form.getTask(); task != nil {
+						m.saveTask(task)
+						m.config.Save()
+						m.mode = m.prevMode
+						m.setStatus("Task saved!")
+					}
+				} else {
+					// In a form field, move to next
+					return m.Update(tea.KeyMsg{Type: tea.KeyTab})
+				}
+			}
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -168,6 +212,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, tick()
+	}
+
+	// Handle form updates when in form view
+	if m.mode == formView {
+		var cmd tea.Cmd
+		m.form, cmd = m.form.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -250,6 +301,8 @@ func (m model) View() string {
 		return m.dashboardView()
 	case listView:
 		return m.listView()
+	case formView:
+		return m.form.View()
 	default:
 		return m.dashboardView()
 	}
@@ -424,7 +477,7 @@ func (m model) helpView() string {
 	if !m.showHelp {
 		helpStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666"))
-		return helpStyle.Render("Press ? for help • Tab to switch views • q to quit")
+		return helpStyle.Render("Press ? for help • Tab to switch views • a to add task • q to quit")
 	}
 
 	helpStyle := lipgloss.NewStyle().
@@ -441,8 +494,9 @@ func (m model) helpView() string {
 		"",
 		"Actions:",
 		"  enter/␣  - Toggle task",
+		"  e        - Edit task",
 		"  d/x      - Delete task",
-		"  a/n      - Add task (coming soon)",
+		"  a/n      - Add new task",
 		"  r        - Reload config",
 		"",
 		"Other:",
@@ -462,4 +516,48 @@ func tick() tea.Cmd {
 // Helper to generate task ID
 func generateTaskID() string {
 	return uuid.New().String()[:8]
+}
+
+func (m *model) saveTask(task *Task) {
+	// If editing existing task, find and update it
+	if m.form.editingTask != nil {
+		for gi, group := range m.config.Groups {
+			for ti, t := range group.Tasks {
+				if t.ID == m.form.editingTask.ID {
+					// Move to new priority group if changed
+					if t.Priority != task.Priority {
+						// Remove from old group
+						m.config.Groups[gi].Tasks = append(
+							m.config.Groups[gi].Tasks[:ti],
+							m.config.Groups[gi].Tasks[ti+1:]...,
+						)
+						// Add to new group
+						m.addTaskToGroup(task)
+					} else {
+						// Update in place
+						m.config.Groups[gi].Tasks[ti] = *task
+					}
+					return
+				}
+			}
+		}
+	}
+
+	// New task - add to appropriate group
+	m.addTaskToGroup(task)
+}
+
+func (m *model) addTaskToGroup(task *Task) {
+	// Find matching priority group
+	for gi, group := range m.config.Groups {
+		if group.Priority == task.Priority {
+			m.config.Groups[gi].Tasks = append(m.config.Groups[gi].Tasks, *task)
+			return
+		}
+	}
+
+	// If no matching group, add to first group
+	if len(m.config.Groups) > 0 {
+		m.config.Groups[0].Tasks = append(m.config.Groups[0].Tasks, *task)
+	}
 }
