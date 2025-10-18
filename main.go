@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -70,6 +74,7 @@ type Task struct {
 	Done        bool      `json:"done"`
 	CreatedAt   time.Time `json:"created_at"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
+	Notes       string    `json:"notes,omitempty"`
 }
 
 // TaskItem wraps Task with category name for display
@@ -102,10 +107,22 @@ func (t TaskItem) Title() string {
 }
 
 func (t TaskItem) Description() string {
-	if t.Done {
-		return fmt.Sprintf("Completed: %s", t.CompletedAt.Format("2006-01-02 15:04"))
+	age := time.Since(t.CreatedAt)
+	days := int(age.Hours() / 24)
+
+	var ageStr string
+	if days == 0 {
+		ageStr = "Created today"
+	} else if days == 1 {
+		ageStr = "1 day old"
+	} else {
+		ageStr = fmt.Sprintf("%d days old", days)
 	}
-	return ""
+
+	if t.Done {
+		return fmt.Sprintf("Completed: %s • %s", t.CompletedAt.Format("2006-01-02 15:04"), ageStr)
+	}
+	return ageStr
 }
 
 func (t TaskItem) FilterValue() string {
@@ -148,7 +165,25 @@ const (
 	completedView
 	deleteConfirmView
 	categoryListView
+	syncConfirmView
+	pullConfirmView
+	editTaskView
+	taskDetailView
 )
+
+// syncResultMsg is sent when the GitHub sync completes
+type syncResultMsg struct {
+	success bool
+	error   string
+}
+
+// pullResultMsg is sent when the GitHub pull completes
+type pullResultMsg struct {
+	success      bool
+	error        string
+	remoteConfig *Config
+	hasConflict  bool
+}
 
 // Model is the Bubble Tea model
 type model struct {
@@ -169,6 +204,13 @@ type model struct {
 	taskToDelete     *Task
 	categoryToDelete *Category
 	editingCategory  *Category
+	editingTask      *Task
+	notesTextarea    textarea.Model
+	configChanged    bool
+	syncInProgress   bool
+	pullInProgress   bool
+	remoteConfig     *Config
+	spinner          spinner.Model
 }
 
 func main() {
@@ -180,6 +222,17 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Config seeded with weekend tasks!")
+		os.Exit(0)
+	}
+
+	// Check for pull flag (for initial setup on new machine)
+	if len(os.Args) > 1 && os.Args[1] == "--pull" {
+		fmt.Println("Pulling config from GitHub...")
+		if err := pullConfigFromGitHub(); err != nil {
+			fmt.Printf("Error pulling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Config pulled successfully!")
 		os.Exit(0)
 	}
 
@@ -196,6 +249,7 @@ func main() {
 		config:        cfg,
 		categoryInput: textinput.New(),
 		taskInputs:    make([]textinput.Model, 2),
+		notesTextarea: textarea.New(),
 	}
 
 	m.categoryInput.Placeholder = "Category name"
@@ -209,11 +263,38 @@ func main() {
 	m.taskInputs[1].Placeholder = "Priority (0-3)"
 	m.taskInputs[1].CharLimit = 1
 
+	m.notesTextarea.Placeholder = "Add notes here..."
+	m.notesTextarea.CharLimit = 2000
+	m.notesTextarea.SetHeight(10)
+
 	// Initialize lists
 	m.list = list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
 	m.list.Title = "Tasks"
 	m.list.SetShowStatusBar(false)
 	m.list.SetFilteringEnabled(false)
+
+	// Disable default keybindings we don't want
+	m.list.KeyMap.GoToStart.SetEnabled(false)
+	m.list.KeyMap.GoToEnd.SetEnabled(false)
+
+	m.list.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "new task")),
+			key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "new category")),
+			key.NewBinding(key.WithKeys("x", "space"), key.WithHelp("x/space", "toggle done")),
+			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit task")),
+			key.NewBinding(key.WithKeys("enter", "i"), key.WithHelp("enter/i", "view details")),
+			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		}
+	}
+	m.list.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "categories")),
+			key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "completed")),
+			key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "sync github")),
+			key.NewBinding(key.WithKeys(""), key.WithHelp("", "todobi - simple terminal task manager - builtbywilly.com")),
+		}
+	}
 
 	m.completedList = list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
 	m.completedList.Title = "Completed Tasks"
@@ -224,6 +305,11 @@ func main() {
 	m.categoryList.Title = "Categories"
 	m.categoryList.SetShowStatusBar(false)
 	m.categoryList.SetFilteringEnabled(false)
+
+	// Initialize spinner
+	m.spinner = spinner.New()
+	m.spinner.Spinner = spinner.Pulse
+	m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -267,6 +353,11 @@ func saveConfig(cfg *Config) error {
 	}
 
 	return os.WriteFile(path, data, 0644)
+}
+
+func (m *model) saveConfigAndMarkChanged() {
+	saveConfig(m.config)
+	m.configChanged = true
 }
 
 func defaultConfig() *Config {
@@ -354,7 +445,7 @@ func seedWeekendTasks() *Config {
 
 // Bubble Tea interface
 func (m model) Init() tea.Cmd {
-	return nil
+	return m.spinner.Tick
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -377,6 +468,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case syncResultMsg:
+		m.syncInProgress = false
+		if msg.success {
+			m.setStatus("Synced to GitHub successfully!")
+			m.configChanged = false
+		} else {
+			m.setStatus("Sync failed: " + msg.error)
+		}
+		m.mode = m.prevMode
+		return m, nil
+
+	case pullResultMsg:
+		m.pullInProgress = false
+		if msg.success {
+			if msg.hasConflict {
+				// Store remote config for conflict resolution
+				m.remoteConfig = msg.remoteConfig
+				m.setStatus("Conflict detected - choose merge strategy")
+				m.mode = pullConfirmView
+			} else {
+				// No conflict, just apply the remote config
+				m.config = msg.remoteConfig
+				m.updateLists()
+				m.configChanged = false
+				m.setStatus("Pulled from GitHub successfully!")
+				m.mode = m.prevMode
+			}
+		} else {
+			m.setStatus("Pull failed: " + msg.error)
+			m.mode = m.prevMode
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// Form handling
 		if m.mode == categoryFormView {
@@ -385,11 +509,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == taskFormView {
 			return m.handleTaskForm(msg)
 		}
+		if m.mode == editTaskView {
+			return m.handleTaskEdit(msg)
+		}
+		if m.mode == taskDetailView {
+			return m.handleTaskDetail(msg)
+		}
 		if m.mode == deleteConfirmView {
 			return m.handleDeleteConfirm(msg)
 		}
 		if m.mode == categoryListView {
 			return m.handleCategoryList(msg)
+		}
+		if m.mode == syncConfirmView {
+			return m.handleSyncConfirm(msg)
+		}
+		if m.mode == pullConfirmView {
+			return m.handlePullConfirm(msg)
 		}
 
 		// Main view handling
@@ -447,7 +583,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "d":
 			return m.confirmDelete()
+
+		case "e":
+			return m.startEditTask()
+
+		case "enter", "i":
+			return m.viewTaskDetail()
+
+		case "G":
+			m.prevMode = m.mode
+			m.mode = syncConfirmView
+			return m, nil
+
+		case "g":
+			m.prevMode = m.mode
+			m.pullInProgress = true
+			m.setStatus("Pulling from GitHub...")
+			return m, tea.Batch(pullFromGitHubCmd(m.config), m.spinner.Tick)
 		}
+	}
+
+	// Handle spinner tick messages
+	if _, ok := msg.(spinner.TickMsg); ok && (m.syncInProgress || m.pullInProgress) {
+		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	// Update the active list
@@ -567,7 +726,7 @@ func (m model) toggleTask() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	saveConfig(m.config)
+	m.saveConfigAndMarkChanged()
 	m.updateLists()
 	return m, nil
 }
@@ -611,7 +770,7 @@ func (m model) deleteTask() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	saveConfig(m.config)
+	m.saveConfigAndMarkChanged()
 	m.updateLists()
 	m.setStatus("Task deleted")
 	m.taskToDelete = nil
@@ -634,6 +793,102 @@ func (m model) handleDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m model) handleSyncConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		m.syncInProgress = true
+		m.setStatus("Syncing to GitHub...")
+		// Return both the sync command AND the spinner tick to start animation
+		return m, tea.Batch(syncToGitHubCmd(), m.spinner.Tick)
+	case "n", "N", "esc":
+		m.mode = m.prevMode
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) handlePullConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "l", "L":
+		// Keep local - discard remote
+		m.remoteConfig = nil
+		m.mode = m.prevMode
+		m.setStatus("Kept local version")
+		return m, nil
+	case "r", "R":
+		// Use remote - overwrite local
+		if m.remoteConfig != nil {
+			m.config = m.remoteConfig
+			m.saveConfigAndMarkChanged()
+			m.updateLists()
+			m.remoteConfig = nil
+			m.configChanged = false
+			m.setStatus("Applied remote version")
+		}
+		m.mode = m.prevMode
+		return m, nil
+	case "m", "M":
+		// Merge: combine tasks and categories
+		if m.remoteConfig != nil {
+			m.config = mergeConfigs(m.config, m.remoteConfig)
+			m.saveConfigAndMarkChanged()
+			m.updateLists()
+			m.remoteConfig = nil
+			m.configChanged = false
+			m.setStatus("Merged local and remote")
+		}
+		m.mode = m.prevMode
+		return m, nil
+	case "esc":
+		m.remoteConfig = nil
+		m.mode = m.prevMode
+		return m, nil
+	}
+	return m, nil
+}
+
+// mergeConfigs combines local and remote configs intelligently
+func mergeConfigs(local, remote *Config) *Config {
+	merged := &Config{
+		Version:    local.Version,
+		LastUpdate: time.Now(),
+	}
+
+	// Merge categories by ID
+	categoryMap := make(map[string]Category)
+	for _, cat := range local.Categories {
+		categoryMap[cat.ID] = cat
+	}
+	for _, cat := range remote.Categories {
+		// Remote category takes precedence if exists in both
+		categoryMap[cat.ID] = cat
+	}
+	for _, cat := range categoryMap {
+		merged.Categories = append(merged.Categories, cat)
+	}
+
+	// Merge tasks by ID
+	taskMap := make(map[string]Task)
+	for _, task := range local.Tasks {
+		taskMap[task.ID] = task
+	}
+	for _, task := range remote.Tasks {
+		// Use newer task if it exists in both
+		if existing, ok := taskMap[task.ID]; ok {
+			if task.CreatedAt.After(existing.CreatedAt) {
+				taskMap[task.ID] = task
+			}
+		} else {
+			taskMap[task.ID] = task
+		}
+	}
+	for _, task := range taskMap {
+		merged.Tasks = append(merged.Tasks, task)
+	}
+
+	return merged
 }
 
 func (m model) deleteCategory() (tea.Model, tea.Cmd) {
@@ -664,12 +919,200 @@ func (m model) deleteCategory() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	saveConfig(m.config)
+	m.saveConfigAndMarkChanged()
 	m.updateCategoryList()
 	m.setStatus("Category deleted")
 	m.categoryToDelete = nil
 	m.mode = m.prevMode
 	return m, nil
+}
+
+// syncToGitHubCmd returns a tea.Cmd that performs the GitHub sync asynchronously
+func syncToGitHubCmd() tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return syncResultMsg{success: false, error: err.Error()}
+		}
+
+		configPath := filepath.Join(home, configFileName)
+		repoName := "todobi-sync"
+
+		// Check if gh CLI is installed
+		if err := exec.Command("gh", "--version").Run(); err != nil {
+			return syncResultMsg{success: false, error: "gh CLI not installed. Install from https://cli.github.com"}
+		}
+
+		// Create temp directory for git operations
+		tmpDir := filepath.Join(os.TempDir(), "todobi-sync-tmp")
+		os.RemoveAll(tmpDir)
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return syncResultMsg{success: false, error: "Failed to create temp directory: " + err.Error()}
+		}
+		defer os.RemoveAll(tmpDir)
+
+		// Check if repo exists
+		checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
+		repoExists := checkCmd.Run() == nil
+
+		if !repoExists {
+			// Repo doesn't exist, create it
+			createCmd := exec.Command("gh", "repo", "create", repoName, "--private", "--clone=false")
+			output, err := createCmd.CombinedOutput()
+			if err != nil {
+				return syncResultMsg{success: false, error: fmt.Sprintf("Error creating repo: %s - %s", err.Error(), string(output))}
+			}
+			// Now clone the newly created repo
+			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
+			if err := cloneCmd.Run(); err != nil {
+				return syncResultMsg{success: false, error: "Error cloning new repo: " + err.Error()}
+			}
+		} else {
+			// Clone existing repo
+			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
+			if err := cloneCmd.Run(); err != nil {
+				return syncResultMsg{success: false, error: "Error cloning repo: " + err.Error()}
+			}
+		}
+
+		// Copy config file to repo
+		destPath := filepath.Join(tmpDir, ".todobi.conf")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return syncResultMsg{success: false, error: "Error reading config: " + err.Error()}
+		}
+
+		if err := os.WriteFile(destPath, data, 0644); err != nil {
+			return syncResultMsg{success: false, error: "Error writing config to repo: " + err.Error()}
+		}
+
+		// Git add, commit, push
+		addCmd := exec.Command("git", "add", ".todobi.conf")
+		addCmd.Dir = tmpDir
+		if err := addCmd.Run(); err != nil {
+			return syncResultMsg{success: false, error: "Error adding file: " + err.Error()}
+		}
+
+		commitCmd := exec.Command("git", "commit", "-m", fmt.Sprintf("Update tasks - %s", time.Now().Format("2006-01-02 15:04:05")))
+		commitCmd.Dir = tmpDir
+		commitCmd.Run() // Ignore error if nothing to commit
+
+		pushCmd := exec.Command("git", "push")
+		pushCmd.Dir = tmpDir
+		if err := pushCmd.Run(); err != nil {
+			return syncResultMsg{success: false, error: "Error pushing to GitHub: " + err.Error()}
+		}
+
+		return syncResultMsg{success: true}
+	}
+}
+
+// pullFromGitHubCmd returns a tea.Cmd that pulls config from GitHub asynchronously
+func pullFromGitHubCmd(localConfig *Config) tea.Cmd {
+	return func() tea.Msg {
+		repoName := "todobi-sync"
+
+		// Check if gh CLI is installed
+		if err := exec.Command("gh", "--version").Run(); err != nil {
+			return pullResultMsg{success: false, error: "gh CLI not installed. Install from https://cli.github.com"}
+		}
+
+		// Check if repo exists
+		checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
+		if checkCmd.Run() != nil {
+			return pullResultMsg{success: false, error: "Remote repo 'todobi-sync' does not exist. Push to GitHub first with 'G'"}
+		}
+
+		// Create temp directory for git operations
+		tmpDir := filepath.Join(os.TempDir(), "todobi-pull-tmp")
+		os.RemoveAll(tmpDir)
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return pullResultMsg{success: false, error: "Failed to create temp directory: " + err.Error()}
+		}
+		defer os.RemoveAll(tmpDir)
+
+		// Clone the repo
+		cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
+		if err := cloneCmd.Run(); err != nil {
+			return pullResultMsg{success: false, error: "Error cloning repo: " + err.Error()}
+		}
+
+		// Read the remote config
+		remotePath := filepath.Join(tmpDir, ".todobi.conf")
+		data, err := os.ReadFile(remotePath)
+		if err != nil {
+			return pullResultMsg{success: false, error: "Error reading remote config: " + err.Error()}
+		}
+
+		var remoteConfig Config
+		if err := json.Unmarshal(data, &remoteConfig); err != nil {
+			return pullResultMsg{success: false, error: "Error parsing remote config: " + err.Error()}
+		}
+
+		// Check for conflicts: if local has changes AND remote is newer
+		hasConflict := false
+		if localConfig.LastUpdate.After(remoteConfig.LastUpdate) {
+			// Local is newer - this is a conflict if remote also has changes
+			// For simplicity, we'll consider it a conflict if timestamps differ
+			hasConflict = !localConfig.LastUpdate.Equal(remoteConfig.LastUpdate)
+		}
+
+		return pullResultMsg{
+			success:      true,
+			remoteConfig: &remoteConfig,
+			hasConflict:  hasConflict,
+		}
+	}
+}
+
+// pullConfigFromGitHub is a helper for the --pull CLI flag
+func pullConfigFromGitHub() error {
+	repoName := "todobi-sync"
+
+	// Check if gh CLI is installed
+	if err := exec.Command("gh", "--version").Run(); err != nil {
+		return fmt.Errorf("gh CLI not installed. Install from https://cli.github.com")
+	}
+
+	// Check if repo exists
+	checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
+	if checkCmd.Run() != nil {
+		return fmt.Errorf("remote repo 'todobi-sync' does not exist")
+	}
+
+	// Create temp directory
+	tmpDir := filepath.Join(os.TempDir(), "todobi-pull-tmp")
+	os.RemoveAll(tmpDir)
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Clone the repo
+	cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
+	if err := cloneCmd.Run(); err != nil {
+		return fmt.Errorf("error cloning repo: %w", err)
+	}
+
+	// Read the remote config
+	remotePath := filepath.Join(tmpDir, ".todobi.conf")
+	data, err := os.ReadFile(remotePath)
+	if err != nil {
+		return fmt.Errorf("error reading remote config: %w", err)
+	}
+
+	// Write to local config path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("error getting home directory: %w", err)
+	}
+
+	localPath := filepath.Join(home, configFileName)
+	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		return fmt.Errorf("error writing local config: %w", err)
+	}
+
+	return nil
 }
 
 func (m model) handleCategoryForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -693,7 +1136,7 @@ func (m model) handleCategoryForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-				saveConfig(m.config)
+				m.saveConfigAndMarkChanged()
 				m.updateCategoryList()
 				m.setStatus("Category updated")
 			} else {
@@ -703,7 +1146,7 @@ func (m model) handleCategoryForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					Name: name,
 				}
 				m.config.Categories = append(m.config.Categories, newCat)
-				saveConfig(m.config)
+				m.saveConfigAndMarkChanged()
 				m.setStatus("Category created")
 			}
 		}
@@ -816,7 +1259,7 @@ func (m model) handleTaskForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					CreatedAt:  time.Now(),
 				}
 				m.config.Tasks = append(m.config.Tasks, newTask)
-				saveConfig(m.config)
+				m.saveConfigAndMarkChanged()
 				m.updateLists()
 				m.setStatus("Task created")
 			}
@@ -865,12 +1308,20 @@ func (m model) View() string {
 		return m.renderCategoryForm()
 	case taskFormView:
 		return m.renderTaskForm()
+	case editTaskView:
+		return m.renderEditTaskForm()
+	case taskDetailView:
+		return m.renderTaskDetailView()
 	case completedView:
 		return m.renderCompletedView()
 	case deleteConfirmView:
 		return m.renderDeleteConfirm()
 	case categoryListView:
 		return m.renderCategoryList()
+	case syncConfirmView:
+		return m.renderSyncConfirm()
+	case pullConfirmView:
+		return m.renderPullConfirm()
 	default:
 		return m.renderListView()
 	}
@@ -1024,20 +1475,521 @@ func (m model) renderDeleteConfirm() string {
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
 }
 
+func (m model) renderSyncConfirm() string {
+	var output strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#4ec9b0"))
+
+	output.WriteString(titleStyle.Render("Sync to GitHub?"))
+	output.WriteString("\n\n")
+
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d4d4d4"))
+
+	output.WriteString(infoStyle.Render("This will sync your .todobi.conf to a private GitHub repo"))
+	output.WriteString("\n")
+	output.WriteString(infoStyle.Render("named 'todobi-sync'."))
+	output.WriteString("\n\n")
+
+	if m.syncInProgress {
+		output.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), infoStyle.Render("Syncing to GitHub...")))
+	} else {
+		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+		output.WriteString(helpStyle.Render("y: sync | n/esc: cancel"))
+	}
+
+	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
+}
+
+func (m model) renderPullConfirm() string {
+	var output strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#4ec9b0"))
+
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d4d4d4"))
+
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffc107")).
+		Bold(true)
+
+	if m.pullInProgress {
+		output.WriteString(titleStyle.Render("Pulling from GitHub"))
+		output.WriteString("\n\n")
+		output.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), infoStyle.Render("Fetching remote config...")))
+	} else if m.remoteConfig != nil {
+		// Show conflict resolution UI
+		output.WriteString(warningStyle.Render("Sync Conflict Detected!"))
+		output.WriteString("\n\n")
+		output.WriteString(infoStyle.Render("Both local and remote have changes."))
+		output.WriteString("\n")
+		output.WriteString(infoStyle.Render("Choose how to resolve:"))
+		output.WriteString("\n\n")
+
+		optionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
+		output.WriteString(optionStyle.Render("L: "))
+		output.WriteString(infoStyle.Render("Keep Local (discard remote changes)"))
+		output.WriteString("\n")
+		output.WriteString(optionStyle.Render("R: "))
+		output.WriteString(infoStyle.Render("Use Remote (overwrite local changes)"))
+		output.WriteString("\n")
+		output.WriteString(optionStyle.Render("M: "))
+		output.WriteString(infoStyle.Render("Merge (combine both, newer tasks win)"))
+		output.WriteString("\n\n")
+
+		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+		output.WriteString(helpStyle.Render("esc: cancel"))
+	}
+
+	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
+}
+
 func (m model) renderFooter() string {
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
+	warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffc107")).Bold(true)
 
 	status := ""
 	if time.Now().Before(m.statusUntil) {
 		status = statusStyle.Render(m.statusMsg) + " "
+	} else if m.configChanged {
+		status = warningStyle.Render("Unsynced changes - Press G to sync ") + " "
 	}
+
+	var helpText string
+	if m.mode == completedView {
+		helpText = "v: back | e: edit | i: details | x: reopen | d: delete | g: pull | G: push | q: quit"
+	} else {
+		helpText = "c: categories | C: new category | T: task | e: edit | i: details | v: completed | x: done | d: delete | g: pull | G: push | q: quit"
+	}
+
+	// Wrap help text to terminal width
+	availableWidth := m.width - lipgloss.Width(status)
+	if availableWidth < 40 {
+		availableWidth = m.width
+		status = ""
+	}
+
+	wrappedHelp := wrapText(helpText, availableWidth)
+	return status + helpStyle.Render(wrappedHelp)
+}
+
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+
+	// If text fits, return as-is
+	if len(text) <= width {
+		return text
+	}
+
+	// Split by pipe separator and wrap
+	parts := strings.Split(text, " | ")
+	var lines []string
+	var currentLine string
+
+	for _, part := range parts {
+		testLine := currentLine
+		if currentLine != "" {
+			testLine += " | "
+		}
+		testLine += part
+
+		if len(testLine) <= width {
+			currentLine = testLine
+		} else {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+			}
+			currentLine = part
+		}
+	}
+
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) startEditTask() (tea.Model, tea.Cmd) {
+	var selectedTask Task
+	found := false
 
 	if m.mode == completedView {
-		return status + helpStyle.Render("v: back | x: reopen | d: delete | q: quit")
+		if item := m.completedList.SelectedItem(); item != nil {
+			selectedTask = item.(TaskItem).Task
+			found = true
+		}
+	} else {
+		if item := m.list.SelectedItem(); item != nil {
+			selectedTask = item.(TaskItem).Task
+			found = true
+		}
 	}
 
-	return status + helpStyle.Render("c: categories | C: new category | T: task | v: completed | x: done | d: delete | q: quit")
+	if !found {
+		return m, nil
+	}
+
+	// Set up edit mode
+	m.editingTask = &selectedTask
+	m.prevMode = m.mode
+	m.mode = editTaskView
+	m.formFocus = 0
+
+	// Populate form fields with current task data
+	m.taskInputs[0].SetValue(selectedTask.Content)
+	m.taskInputs[0].Focus()
+	m.taskInputs[1].SetValue(fmt.Sprintf("%d", selectedTask.Priority))
+	m.taskInputs[1].Blur()
+
+	return m, textinput.Blink
+}
+
+func (m model) viewTaskDetail() (tea.Model, tea.Cmd) {
+	var selectedTask Task
+	found := false
+
+	if m.mode == completedView {
+		if item := m.completedList.SelectedItem(); item != nil {
+			selectedTask = item.(TaskItem).Task
+			found = true
+		}
+	} else {
+		if item := m.list.SelectedItem(); item != nil {
+			selectedTask = item.(TaskItem).Task
+			found = true
+		}
+	}
+
+	if !found {
+		return m, nil
+	}
+
+	// Set up detail view
+	m.editingTask = &selectedTask
+	m.prevMode = m.mode
+	m.mode = taskDetailView
+
+	// Initialize textarea with current notes
+	m.notesTextarea.SetValue(selectedTask.Notes)
+	m.notesTextarea.Focus()
+
+	return m, textarea.Blink
+}
+
+func (m model) handleTaskEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg.String() {
+	case "esc":
+		m.mode = m.prevMode
+		m.editingTask = nil
+		for i := range m.taskInputs {
+			m.taskInputs[i].Blur()
+		}
+		return m, nil
+
+	case "up", "down":
+		// Navigate with arrow keys
+		if msg.String() == "down" {
+			m.formFocus++
+		} else {
+			m.formFocus--
+		}
+
+		if m.formFocus < 0 {
+			m.formFocus = len(m.taskInputs) + len(m.config.Categories) - 1
+		} else if m.formFocus >= len(m.taskInputs)+len(m.config.Categories) {
+			m.formFocus = 0
+		}
+
+		for i := range m.taskInputs {
+			m.taskInputs[i].Blur()
+		}
+
+		if m.formFocus < len(m.taskInputs) {
+			m.taskInputs[m.formFocus].Focus()
+			return m, textinput.Blink
+		}
+		return m, nil
+
+	case "enter":
+		// Progress through form or submit
+		catIndex := m.formFocus - len(m.taskInputs)
+
+		// If we're on a category, submit the form
+		if catIndex >= 0 && catIndex < len(m.config.Categories) {
+			content := strings.TrimSpace(m.taskInputs[0].Value())
+			if content != "" && m.editingTask != nil {
+				priority := P1High
+				if p := m.taskInputs[1].Value(); p != "" {
+					switch p[0] {
+					case '0':
+						priority = P0Critical
+					case '2':
+						priority = P2Medium
+					case '3':
+						priority = P3Low
+					}
+				}
+
+				// Find and update the task in config
+				for i := range m.config.Tasks {
+					if m.config.Tasks[i].ID == m.editingTask.ID {
+						m.config.Tasks[i].Content = content
+						m.config.Tasks[i].Priority = priority
+						m.config.Tasks[i].CategoryID = m.config.Categories[catIndex].ID
+						break
+					}
+				}
+
+				m.saveConfigAndMarkChanged()
+				m.updateLists()
+				m.setStatus("Task updated")
+			}
+			m.mode = m.prevMode
+			m.editingTask = nil
+			for i := range m.taskInputs {
+				m.taskInputs[i].Blur()
+			}
+			return m, nil
+		}
+
+		// Otherwise, progress to next field
+		m.formFocus++
+		if m.formFocus >= len(m.taskInputs)+len(m.config.Categories) {
+			m.formFocus = len(m.taskInputs) + len(m.config.Categories) - 1
+		}
+
+		for i := range m.taskInputs {
+			m.taskInputs[i].Blur()
+		}
+
+		if m.formFocus < len(m.taskInputs) {
+			m.taskInputs[m.formFocus].Focus()
+			return m, textinput.Blink
+		}
+		return m, nil
+	}
+
+	if m.formFocus < len(m.taskInputs) {
+		m.taskInputs[m.formFocus], cmd = m.taskInputs[m.formFocus].Update(msg)
+	}
+	return m, cmd
+}
+
+func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg.String() {
+	case "esc":
+		// Save notes before exiting
+		if m.editingTask != nil {
+			notes := strings.TrimSpace(m.notesTextarea.Value())
+			for i := range m.config.Tasks {
+				if m.config.Tasks[i].ID == m.editingTask.ID {
+					if m.config.Tasks[i].Notes != notes {
+						m.config.Tasks[i].Notes = notes
+						m.saveConfigAndMarkChanged()
+						m.setStatus("Notes saved")
+					}
+					break
+				}
+			}
+		}
+		m.mode = m.prevMode
+		m.editingTask = nil
+		m.notesTextarea.Blur()
+		return m, nil
+
+	case "ctrl+s":
+		// Manual save with Ctrl+S
+		if m.editingTask != nil {
+			notes := strings.TrimSpace(m.notesTextarea.Value())
+			for i := range m.config.Tasks {
+				if m.config.Tasks[i].ID == m.editingTask.ID {
+					m.config.Tasks[i].Notes = notes
+					m.saveConfigAndMarkChanged()
+					m.setStatus("Notes saved")
+					break
+				}
+			}
+		}
+		return m, nil
+	}
+
+	m.notesTextarea, cmd = m.notesTextarea.Update(msg)
+	return m, cmd
+}
+
+func (m model) renderEditTaskForm() string {
+	var output strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#4ec9b0"))
+
+	output.WriteString(titleStyle.Render("Edit Task"))
+	output.WriteString("\n\n")
+
+	// Task content input
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#999"))
+	if m.formFocus == 0 {
+		labelStyle = labelStyle.Foreground(lipgloss.Color("#4ec9b0"))
+	}
+	output.WriteString(labelStyle.Render("Content:"))
+	output.WriteString("\n")
+	output.WriteString(m.taskInputs[0].View())
+	output.WriteString("\n\n")
+
+	// Priority input
+	labelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#999"))
+	if m.formFocus == 1 {
+		labelStyle = labelStyle.Foreground(lipgloss.Color("#4ec9b0"))
+	}
+	output.WriteString(labelStyle.Render("Priority (0-3):"))
+	output.WriteString("\n")
+	output.WriteString(m.taskInputs[1].View())
+	output.WriteString("\n\n")
+
+	// Category selection
+	output.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#999")).Render("Category:"))
+	output.WriteString("\n")
+
+	for i, cat := range m.config.Categories {
+		catIndex := len(m.taskInputs) + i
+		cursor := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+
+		// Highlight current category
+		if m.editingTask != nil && cat.ID == m.editingTask.CategoryID && m.formFocus != catIndex {
+			cursor = "* "
+		}
+
+		if m.formFocus == catIndex {
+			cursor = "> "
+			style = style.Foreground(lipgloss.Color("#4ec9b0")).Bold(true)
+		}
+
+		output.WriteString(cursor + style.Render(cat.Name) + "\n")
+	}
+
+	output.WriteString("\n")
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+	output.WriteString(helpStyle.Render("arrows: navigate | enter: next/save | esc: cancel"))
+
+	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
+}
+
+func (m model) renderTaskDetailView() string {
+	if m.editingTask == nil {
+		return "No task selected"
+	}
+
+	// Helper to find category name
+	getCategoryName := func(categoryID string) string {
+		for _, cat := range m.config.Categories {
+			if cat.ID == categoryID {
+				return cat.Name
+			}
+		}
+		return "Unknown"
+	}
+
+	var output strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#4ec9b0"))
+
+	output.WriteString(titleStyle.Render("Task Details"))
+	output.WriteString("\n\n")
+
+	// Create a bordered box for task info
+	infoStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#4ec9b0")).
+		Padding(1, 2).
+		Width(60)
+
+	var info strings.Builder
+	labelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#999")).
+		Bold(true)
+
+	valueStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d4d4d4"))
+
+	priorityStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(m.editingTask.Priority.Color())).
+		Bold(true)
+
+	info.WriteString(labelStyle.Render("Content: "))
+	info.WriteString(valueStyle.Render(m.editingTask.Content))
+	info.WriteString("\n\n")
+
+	info.WriteString(labelStyle.Render("Category: "))
+	info.WriteString(valueStyle.Render(getCategoryName(m.editingTask.CategoryID)))
+	info.WriteString("\n\n")
+
+	info.WriteString(labelStyle.Render("Priority: "))
+	info.WriteString(priorityStyle.Render(m.editingTask.Priority.String()))
+	info.WriteString("\n\n")
+
+	info.WriteString(labelStyle.Render("Created: "))
+	info.WriteString(valueStyle.Render(m.editingTask.CreatedAt.Format("2006-01-02 15:04")))
+	info.WriteString("\n\n")
+
+	age := time.Since(m.editingTask.CreatedAt)
+	days := int(age.Hours() / 24)
+	var ageStr string
+	if days == 0 {
+		ageStr = "Created today"
+	} else if days == 1 {
+		ageStr = "1 day old"
+	} else {
+		ageStr = fmt.Sprintf("%d days old", days)
+	}
+	info.WriteString(labelStyle.Render("Age: "))
+	info.WriteString(valueStyle.Render(ageStr))
+	info.WriteString("\n\n")
+
+	info.WriteString(labelStyle.Render("Status: "))
+	if m.editingTask.Done {
+		doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4caf50"))
+		info.WriteString(doneStyle.Render("Completed"))
+		if !m.editingTask.CompletedAt.IsZero() {
+			info.WriteString(valueStyle.Render(fmt.Sprintf(" (%s)", m.editingTask.CompletedAt.Format("2006-01-02 15:04"))))
+		}
+	} else {
+		pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffc107"))
+		info.WriteString(pendingStyle.Render("Pending"))
+	}
+
+	output.WriteString(infoStyle.Render(info.String()))
+	output.WriteString("\n\n")
+
+	// Notes section
+	notesLabelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4ec9b0")).
+		Bold(true)
+
+	output.WriteString(notesLabelStyle.Render("Notes:"))
+	output.WriteString("\n")
+	output.WriteString(m.notesTextarea.View())
+	output.WriteString("\n\n")
+
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+	output.WriteString(helpStyle.Render("ctrl+s: save notes | esc: save and return"))
+
+	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
 }
 
 func generateID() string {
