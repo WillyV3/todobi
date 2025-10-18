@@ -993,6 +993,17 @@ func syncToGitHubCmd() tea.Cmd {
 			return syncResultMsg{success: false, error: "gh CLI not installed. Install from https://cli.github.com"}
 		}
 
+		// Check gh auth status
+		authCheckCmd := exec.Command("gh", "auth", "status")
+		if err := authCheckCmd.Run(); err != nil {
+			return syncResultMsg{success: false, error: "gh CLI not authenticated. Run: gh auth login"}
+		}
+
+		// Configure git to use gh as credential helper for this operation
+		os.Setenv("GIT_CONFIG_COUNT", "1")
+		os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+		os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
+
 		// Create temp directory for git operations
 		tmpDir := filepath.Join(os.TempDir(), "todobi-sync-tmp")
 		os.RemoveAll(tmpDir)
@@ -1074,6 +1085,17 @@ func pullFromGitHubCmd(localConfig *Config) tea.Cmd {
 			return pullResultMsg{success: false, error: "gh CLI not installed. Install from https://cli.github.com"}
 		}
 
+		// Check gh auth status
+		authCheckCmd := exec.Command("gh", "auth", "status")
+		if err := authCheckCmd.Run(); err != nil {
+			return pullResultMsg{success: false, error: "gh CLI not authenticated. Run: gh auth login"}
+		}
+
+		// Configure git to use gh as credential helper for this operation
+		os.Setenv("GIT_CONFIG_COUNT", "1")
+		os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+		os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
+
 		// Check if repo exists
 		checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
 		if checkCmd.Run() != nil {
@@ -1133,6 +1155,17 @@ func pullConfigFromGitHub() error {
 	if err := exec.Command("gh", "--version").Run(); err != nil {
 		return fmt.Errorf("gh CLI not installed. Install from https://cli.github.com")
 	}
+
+	// Check gh auth status
+	authCheckCmd := exec.Command("gh", "auth", "status")
+	if err := authCheckCmd.Run(); err != nil {
+		return fmt.Errorf("gh CLI not authenticated. Run: gh auth login")
+	}
+
+	// Configure git to use gh as credential helper for this operation
+	os.Setenv("GIT_CONFIG_COUNT", "1")
+	os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+	os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
 
 	// Check if repo exists
 	checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
