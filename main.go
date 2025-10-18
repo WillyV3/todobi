@@ -150,10 +150,11 @@ type Category struct {
 
 // Config stores all tasks and categories
 type Config struct {
-	Categories []Category `json:"categories"`
-	Tasks      []Task     `json:"tasks"`
-	LastUpdate time.Time  `json:"last_update"`
-	Version    string     `json:"version"`
+	Categories          []Category `json:"categories"`
+	Tasks               []Task     `json:"tasks"`
+	LastUpdate          time.Time  `json:"last_update"`
+	Version             string     `json:"version"`
+	GitHubSetupComplete bool       `json:"github_setup_complete,omitempty"`
 }
 
 type viewMode int
@@ -169,6 +170,7 @@ const (
 	pullConfirmView
 	editTaskView
 	taskDetailView
+	firstRunView
 )
 
 // syncResultMsg is sent when the GitHub sync completes
@@ -184,6 +186,18 @@ type pullResultMsg struct {
 	remoteConfig *Config
 	hasConflict  bool
 }
+
+// firstRunStep tracks the first-run setup flow
+type firstRunStep int
+
+const (
+	welcomeStep firstRunStep = iota
+	hasRepoPromptStep
+	createRepoPromptStep
+	pullingStep
+	pushingStep
+	completeStep
+)
 
 // Model is the Bubble Tea model
 type model struct {
@@ -211,6 +225,8 @@ type model struct {
 	pullInProgress   bool
 	remoteConfig     *Config
 	spinner          spinner.Model
+	firstRunStep     firstRunStep
+	firstRunError    string
 }
 
 func main() {
@@ -250,6 +266,12 @@ func main() {
 		categoryInput: textinput.New(),
 		taskInputs:    make([]textinput.Model, 2),
 		notesTextarea: textarea.New(),
+		firstRunStep:  welcomeStep,
+	}
+
+	// Check if this is first run (GitHub not set up yet)
+	if !cfg.GitHubSetupComplete {
+		m.mode = firstRunView
 	}
 
 	m.categoryInput.Placeholder = "Category name"
@@ -470,6 +492,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncResultMsg:
 		m.syncInProgress = false
+		if m.mode == firstRunView {
+			// Handle first-run sync completion
+			if msg.success {
+				m.firstRunStep = completeStep
+				m.firstRunError = ""
+			} else {
+				m.firstRunError = msg.error
+				// Allow user to continue despite error
+			}
+			return m, nil
+		}
 		if msg.success {
 			m.setStatus("Synced to GitHub successfully!")
 			m.configChanged = false
@@ -481,6 +514,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pullResultMsg:
 		m.pullInProgress = false
+		if m.mode == firstRunView {
+			// Handle first-run pull completion
+			if msg.success {
+				// Apply remote config without conflict checking on first run
+				m.config = msg.remoteConfig
+				m.updateLists()
+				m.firstRunStep = completeStep
+				m.firstRunError = ""
+			} else {
+				m.firstRunError = msg.error
+				// Allow user to continue despite error
+			}
+			return m, nil
+		}
 		if msg.success {
 			if msg.hasConflict {
 				// Store remote config for conflict resolution
@@ -503,6 +550,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		// Form handling
+		if m.mode == firstRunView {
+			return m.handleFirstRun(msg)
+		}
 		if m.mode == categoryFormView {
 			return m.handleCategoryForm(msg)
 		}
@@ -604,7 +654,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Handle spinner tick messages
-	if _, ok := msg.(spinner.TickMsg); ok && (m.syncInProgress || m.pullInProgress) {
+	if _, ok := msg.(spinner.TickMsg); ok && (m.syncInProgress || m.pullInProgress || m.mode == firstRunView) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 	}
@@ -1304,6 +1354,8 @@ func (m model) View() string {
 	}
 
 	switch m.mode {
+	case firstRunView:
+		return m.renderFirstRun()
 	case categoryFormView:
 		return m.renderCategoryForm()
 	case taskFormView:
@@ -1990,6 +2042,180 @@ func (m model) renderTaskDetailView() string {
 	output.WriteString(helpStyle.Render("ctrl+s: save notes | esc: save and return"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
+}
+
+// handleFirstRun manages the first-run setup flow
+func (m model) handleFirstRun(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.firstRunStep {
+	case welcomeStep:
+		// Any key continues to next step
+		m.firstRunStep = hasRepoPromptStep
+		return m, nil
+
+	case hasRepoPromptStep:
+		switch msg.String() {
+		case "y", "Y":
+			// User has existing repo, start pulling
+			m.firstRunStep = pullingStep
+			m.pullInProgress = true
+			return m, tea.Batch(pullFromGitHubCmd(m.config), m.spinner.Tick)
+		case "n", "N":
+			// User doesn't have repo, ask if they want to create one
+			m.firstRunStep = createRepoPromptStep
+			return m, nil
+		case "esc", "ctrl+c":
+			// Skip GitHub setup for now
+			m.config.GitHubSetupComplete = true
+			m.saveConfigAndMarkChanged()
+			m.mode = listView
+			m.updateLists()
+			m.setStatus("GitHub sync skipped - you can sync later with 'G' or 'g'")
+			return m, nil
+		}
+
+	case createRepoPromptStep:
+		switch msg.String() {
+		case "y", "Y":
+			// Create new repo by pushing current config
+			m.firstRunStep = pushingStep
+			m.syncInProgress = true
+			return m, tea.Batch(syncToGitHubCmd(), m.spinner.Tick)
+		case "n", "N":
+			// Skip GitHub setup
+			m.config.GitHubSetupComplete = true
+			m.saveConfigAndMarkChanged()
+			m.mode = listView
+			m.updateLists()
+			m.setStatus("GitHub sync skipped - you can sync later with 'G' or 'g'")
+			return m, nil
+		case "esc", "ctrl+c":
+			// Skip GitHub setup
+			m.config.GitHubSetupComplete = true
+			m.saveConfigAndMarkChanged()
+			m.mode = listView
+			m.updateLists()
+			m.setStatus("GitHub sync skipped - you can sync later with 'G' or 'g'")
+			return m, nil
+		}
+
+	case pullingStep, pushingStep:
+		// If there's an error, allow any key to continue with local tasks
+		if m.firstRunError != "" {
+			m.config.GitHubSetupComplete = true
+			m.saveConfigAndMarkChanged()
+			m.mode = listView
+			m.updateLists()
+			m.setStatus("Continuing with local tasks - sync later with 'G' or 'g'")
+			return m, nil
+		}
+
+	case completeStep:
+		// Any key transitions to main view
+		m.config.GitHubSetupComplete = true
+		m.saveConfigAndMarkChanged()
+		m.mode = listView
+		m.updateLists()
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// renderFirstRun displays the first-run setup UI
+func (m model) renderFirstRun() string {
+	var output strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#4ec9b0")).
+		Align(lipgloss.Center)
+
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d4d4d4"))
+
+	highlightStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4ec9b0")).
+		Bold(true)
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#666"))
+
+	errorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d73a4a")).
+		Bold(true)
+
+	switch m.firstRunStep {
+	case welcomeStep:
+		output.WriteString(titleStyle.Render("Welcome to todobi!"))
+		output.WriteString("\n\n")
+		output.WriteString(infoStyle.Render("todobi syncs your tasks across machines using GitHub."))
+		output.WriteString("\n")
+		output.WriteString(infoStyle.Render("Your tasks are stored in a private repo called 'todobi-sync'."))
+		output.WriteString("\n\n")
+		output.WriteString(helpStyle.Render("Press any key to continue..."))
+
+	case hasRepoPromptStep:
+		output.WriteString(titleStyle.Render("GitHub Setup"))
+		output.WriteString("\n\n")
+		output.WriteString(infoStyle.Render("Do you have an existing todobi-sync repo on GitHub?"))
+		output.WriteString("\n\n")
+		output.WriteString(highlightStyle.Render("Y: "))
+		output.WriteString(infoStyle.Render("Yes, pull my tasks from GitHub"))
+		output.WriteString("\n")
+		output.WriteString(highlightStyle.Render("N: "))
+		output.WriteString(infoStyle.Render("No, I'm starting fresh"))
+		output.WriteString("\n\n")
+		output.WriteString(helpStyle.Render("esc: skip GitHub sync for now"))
+
+	case createRepoPromptStep:
+		output.WriteString(titleStyle.Render("Create GitHub Repo"))
+		output.WriteString("\n\n")
+		output.WriteString(infoStyle.Render("Would you like to create a todobi-sync repo now?"))
+		output.WriteString("\n")
+		output.WriteString(infoStyle.Render("This will create a private GitHub repo and sync your tasks."))
+		output.WriteString("\n\n")
+		output.WriteString(highlightStyle.Render("Y: "))
+		output.WriteString(infoStyle.Render("Yes, create repo and sync"))
+		output.WriteString("\n")
+		output.WriteString(highlightStyle.Render("N: "))
+		output.WriteString(infoStyle.Render("No, continue without sync"))
+		output.WriteString("\n\n")
+		output.WriteString(helpStyle.Render("esc: skip GitHub sync for now"))
+
+	case pullingStep:
+		output.WriteString(titleStyle.Render("Pulling from GitHub"))
+		output.WriteString("\n\n")
+		output.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), infoStyle.Render("Pulling your tasks from GitHub...")))
+		if m.firstRunError != "" {
+			output.WriteString("\n\n")
+			output.WriteString(errorStyle.Render("Error: " + m.firstRunError))
+			output.WriteString("\n\n")
+			output.WriteString(helpStyle.Render("Press any key to continue with local tasks..."))
+		}
+
+	case pushingStep:
+		output.WriteString(titleStyle.Render("Creating GitHub Repo"))
+		output.WriteString("\n\n")
+		output.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), infoStyle.Render("Creating private repo on GitHub...")))
+		if m.firstRunError != "" {
+			output.WriteString("\n\n")
+			output.WriteString(errorStyle.Render("Error: " + m.firstRunError))
+			output.WriteString("\n\n")
+			output.WriteString(helpStyle.Render("Press any key to continue with local tasks..."))
+		}
+
+	case completeStep:
+		output.WriteString(titleStyle.Render("Setup Complete!"))
+		output.WriteString("\n\n")
+		successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4caf50"))
+		output.WriteString(successStyle.Render("✓ GitHub sync configured successfully!"))
+		output.WriteString("\n\n")
+		output.WriteString(infoStyle.Render("Your tasks will now sync across all your machines."))
+		output.WriteString("\n\n")
+		output.WriteString(helpStyle.Render("Press any key to continue..."))
+	}
+
+	return lipgloss.NewStyle().Padding(2, 4).Render(output.String())
 }
 
 func generateID() string {
