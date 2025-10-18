@@ -218,7 +218,7 @@ main() {
     sed -i '' "s|version \".*\"|version \"${NEW_VERSION#v}\"|" "$FORMULA_PATH"
 
     # Update test assertion
-    sed -i '' "s|assert_match \"todobi v.*\"|assert_match \"todobi v${NEW_VERSION#v}\"|" "$FORMULA_PATH"
+    sed -i '' "s|assert_match \"todobi v.*\", shell_output(\"#{bin}/todobi --version\")|assert_match \"todobi v${NEW_VERSION#v}\", shell_output(\"#{bin}/todobi --version\")|" "$FORMULA_PATH"
 
     # Commit and push to homebrew tap
     cd "$HOMEBREW_TAP_PATH"
