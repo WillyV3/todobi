@@ -999,10 +999,13 @@ func syncToGitHubCmd() tea.Cmd {
 			return syncResultMsg{success: false, error: "gh CLI not authenticated. Run: gh auth login"}
 		}
 
-		// Configure git to use gh as credential helper for this operation
-		os.Setenv("GIT_CONFIG_COUNT", "1")
-		os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
-		os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
+		// Get current user for HTTPS URL construction
+		whoamiCmd := exec.Command("gh", "api", "user", "-q", ".login")
+		usernameBytes, err := whoamiCmd.Output()
+		if err != nil {
+			return syncResultMsg{success: false, error: "Error getting GitHub username: " + err.Error()}
+		}
+		githubUser := strings.TrimSpace(string(usernameBytes))
 
 		// Create temp directory for git operations
 		tmpDir := filepath.Join(os.TempDir(), "todobi-sync-tmp")
@@ -1016,27 +1019,51 @@ func syncToGitHubCmd() tea.Cmd {
 		checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
 		repoExists := checkCmd.Run() == nil
 
+		repoURL := fmt.Sprintf("https://github.com/%s/%s.git", githubUser, repoName)
+
 		if !repoExists {
 			// Repo doesn't exist, create it
 			createCmd := exec.Command("gh", "repo", "create", repoName, "--private", "--clone=false")
-			createCmd.Stdin = nil  // Prevent password prompts
+			createCmd.Stdin = nil
 			output, err := createCmd.CombinedOutput()
 			if err != nil {
 				return syncResultMsg{success: false, error: fmt.Sprintf("Error creating repo: %s - %s", err.Error(), string(output))}
 			}
-			// Now clone the newly created repo
-			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-			cloneCmd.Stdin = nil  // Prevent password prompts
-			cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-			output, err = cloneCmd.CombinedOutput()
-			if err != nil {
-				return syncResultMsg{success: false, error: fmt.Sprintf("Error cloning new repo: %s - %s", err.Error(), string(output))}
+
+			// Initialize new repo locally
+			initCmd := exec.Command("git", "init")
+			initCmd.Dir = tmpDir
+			if err := initCmd.Run(); err != nil {
+				return syncResultMsg{success: false, error: "Error initializing git: " + err.Error()}
+			}
+
+			// Configure git credential helper to use gh
+			credCmd := exec.Command("git", "config", "credential.helper", "")
+			credCmd.Dir = tmpDir
+			credCmd.Run()
+
+			credCmd = exec.Command("git", "config", "--add", "credential.helper", "!gh auth git-credential")
+			credCmd.Dir = tmpDir
+			if err := credCmd.Run(); err != nil {
+				return syncResultMsg{success: false, error: "Error configuring credential helper: " + err.Error()}
+			}
+
+			// Add remote
+			remoteCmd := exec.Command("git", "remote", "add", "origin", repoURL)
+			remoteCmd.Dir = tmpDir
+			if err := remoteCmd.Run(); err != nil {
+				return syncResultMsg{success: false, error: "Error adding remote: " + err.Error()}
 			}
 		} else {
-			// Clone existing repo
-			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-			cloneCmd.Stdin = nil  // Prevent password prompts
-			cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+			// Clone existing repo using HTTPS
+			cloneCmd := exec.Command("git", "clone", repoURL, tmpDir)
+			cloneCmd.Stdin = nil
+			cloneCmd.Env = append(os.Environ(),
+				"GIT_TERMINAL_PROMPT=0",
+				"GIT_CONFIG_COUNT=1",
+				"GIT_CONFIG_KEY_0=credential.helper",
+				"GIT_CONFIG_VALUE_0=!gh auth git-credential",
+			)
 			output, err := cloneCmd.CombinedOutput()
 			if err != nil {
 				return syncResultMsg{success: false, error: fmt.Sprintf("Error cloning repo: %s - %s", err.Error(), string(output))}
@@ -1091,10 +1118,13 @@ func pullFromGitHubCmd(localConfig *Config) tea.Cmd {
 			return pullResultMsg{success: false, error: "gh CLI not authenticated. Run: gh auth login"}
 		}
 
-		// Configure git to use gh as credential helper for this operation
-		os.Setenv("GIT_CONFIG_COUNT", "1")
-		os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
-		os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
+		// Get current user for HTTPS URL construction
+		whoamiCmd := exec.Command("gh", "api", "user", "-q", ".login")
+		usernameBytes, err := whoamiCmd.Output()
+		if err != nil {
+			return pullResultMsg{success: false, error: "Error getting GitHub username: " + err.Error()}
+		}
+		githubUser := strings.TrimSpace(string(usernameBytes))
 
 		// Check if repo exists
 		checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
@@ -1110,10 +1140,16 @@ func pullFromGitHubCmd(localConfig *Config) tea.Cmd {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		// Clone the repo
-		cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-		cloneCmd.Stdin = nil  // Prevent password prompts
-		cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		// Clone the repo using HTTPS with gh credential helper
+		repoURL := fmt.Sprintf("https://github.com/%s/%s.git", githubUser, repoName)
+		cloneCmd := exec.Command("git", "clone", repoURL, tmpDir)
+		cloneCmd.Stdin = nil
+		cloneCmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=credential.helper",
+			"GIT_CONFIG_VALUE_0=!gh auth git-credential",
+		)
 		output, err := cloneCmd.CombinedOutput()
 		if err != nil {
 			return pullResultMsg{success: false, error: fmt.Sprintf("Error cloning repo: %s - %s", err.Error(), string(output))}
@@ -1162,10 +1198,13 @@ func pullConfigFromGitHub() error {
 		return fmt.Errorf("gh CLI not authenticated. Run: gh auth login")
 	}
 
-	// Configure git to use gh as credential helper for this operation
-	os.Setenv("GIT_CONFIG_COUNT", "1")
-	os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
-	os.Setenv("GIT_CONFIG_VALUE_0", "!gh auth git-credential")
+	// Get current user for HTTPS URL construction
+	whoamiCmd := exec.Command("gh", "api", "user", "-q", ".login")
+	usernameBytes, err := whoamiCmd.Output()
+	if err != nil {
+		return fmt.Errorf("error getting GitHub username: %w", err)
+	}
+	githubUser := strings.TrimSpace(string(usernameBytes))
 
 	// Check if repo exists
 	checkCmd := exec.Command("gh", "repo", "view", repoName, "--json", "name")
@@ -1181,10 +1220,16 @@ func pullConfigFromGitHub() error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Clone the repo
-	cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-	cloneCmd.Stdin = nil  // Prevent password prompts
-	cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Clone the repo using HTTPS with gh credential helper
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", githubUser, repoName)
+	cloneCmd := exec.Command("git", "clone", repoURL, tmpDir)
+	cloneCmd.Stdin = nil
+	cloneCmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=!gh auth git-credential",
+	)
 	if err := cloneCmd.Run(); err != nil {
 		return fmt.Errorf("error cloning repo: %w", err)
 	}
