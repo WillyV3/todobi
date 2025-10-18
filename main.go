@@ -1008,20 +1008,27 @@ func syncToGitHubCmd() tea.Cmd {
 		if !repoExists {
 			// Repo doesn't exist, create it
 			createCmd := exec.Command("gh", "repo", "create", repoName, "--private", "--clone=false")
+			createCmd.Stdin = nil  // Prevent password prompts
 			output, err := createCmd.CombinedOutput()
 			if err != nil {
 				return syncResultMsg{success: false, error: fmt.Sprintf("Error creating repo: %s - %s", err.Error(), string(output))}
 			}
 			// Now clone the newly created repo
 			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-			if err := cloneCmd.Run(); err != nil {
-				return syncResultMsg{success: false, error: "Error cloning new repo: " + err.Error()}
+			cloneCmd.Stdin = nil  // Prevent password prompts
+			cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+			output, err = cloneCmd.CombinedOutput()
+			if err != nil {
+				return syncResultMsg{success: false, error: fmt.Sprintf("Error cloning new repo: %s - %s", err.Error(), string(output))}
 			}
 		} else {
 			// Clone existing repo
 			cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-			if err := cloneCmd.Run(); err != nil {
-				return syncResultMsg{success: false, error: "Error cloning repo: " + err.Error()}
+			cloneCmd.Stdin = nil  // Prevent password prompts
+			cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+			output, err := cloneCmd.CombinedOutput()
+			if err != nil {
+				return syncResultMsg{success: false, error: fmt.Sprintf("Error cloning repo: %s - %s", err.Error(), string(output))}
 			}
 		}
 
@@ -1083,8 +1090,11 @@ func pullFromGitHubCmd(localConfig *Config) tea.Cmd {
 
 		// Clone the repo
 		cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
-		if err := cloneCmd.Run(); err != nil {
-			return pullResultMsg{success: false, error: "Error cloning repo: " + err.Error()}
+		cloneCmd.Stdin = nil  // Prevent password prompts
+		cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		output, err := cloneCmd.CombinedOutput()
+		if err != nil {
+			return pullResultMsg{success: false, error: fmt.Sprintf("Error cloning repo: %s - %s", err.Error(), string(output))}
 		}
 
 		// Read the remote config
@@ -1140,6 +1150,8 @@ func pullConfigFromGitHub() error {
 
 	// Clone the repo
 	cloneCmd := exec.Command("gh", "repo", "clone", repoName, tmpDir)
+	cloneCmd.Stdin = nil  // Prevent password prompts
+	cloneCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if err := cloneCmd.Run(); err != nil {
 		return fmt.Errorf("error cloning repo: %w", err)
 	}
