@@ -168,10 +168,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = formView
 				m.form = newTaskForm(nil)
 				m.selectedGroup = 1 // Default to P1
-				return m, textinput.Blink
+				return m, m.form.Init()
 			}
 			return m, nil
+		}
 
+		// Handle additional keys
+		switch msg.String() {
 		case "e":
 			// Edit current task
 			if m.mode == listView {
@@ -181,7 +184,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.mode = formView
 					editTask := tasks[m.cursor]
 					m.form = newTaskForm(&editTask)
-					return m, textinput.Blink
+					return m, m.form.Init()
 				}
 			}
 			return m, nil
@@ -196,9 +199,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.mode = m.prevMode
 						m.setStatus("Task saved!")
 					}
-				} else {
-					// In a form field, move to next
-					return m.Update(tea.KeyMsg{Type: tea.KeyTab})
 				}
 			}
 			return m, nil

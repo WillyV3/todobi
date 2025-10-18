@@ -18,7 +18,7 @@ func main() {
 			}
 			return
 		case "version", "-v", "--version":
-			fmt.Println("todobi v1.0.0")
+			fmt.Println("todobi v1.1.0")
 			return
 		case "help", "-h", "--help":
 			printHelp()
