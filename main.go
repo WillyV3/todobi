@@ -304,7 +304,6 @@ func main() {
 			key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "new task")),
 			key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "new category")),
 			key.NewBinding(key.WithKeys("x", "space"), key.WithHelp("x/space", "toggle done")),
-			key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit task")),
 			key.NewBinding(key.WithKeys("enter", "i"), key.WithHelp("enter/i", "view details")),
 			key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
 		}
@@ -633,9 +632,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "d":
 			return m.confirmDelete()
-
-		case "e":
-			return m.startEditTask()
 
 		case "enter", "i":
 			return m.viewTaskDetail()
@@ -1704,9 +1700,9 @@ func (m model) renderFooter() string {
 
 	var helpText string
 	if m.mode == completedView {
-		helpText = "v: back | e: edit | i: details | x: reopen | d: delete | g: pull | G: push | q: quit"
+		helpText = "v: back | i: details | x: reopen | d: delete | g: pull | G: push | q: quit"
 	} else {
-		helpText = "c: categories | C: new category | T: task | e: edit | i: details | v: completed | x: done | d: delete | g: pull | G: push | q: quit"
+		helpText = "c: categories | C: new category | T: task | i: details | v: completed | x: done | d: delete | g: pull | G: push | q: quit"
 	}
 
 	// Wrap help text to terminal width
@@ -1779,8 +1775,13 @@ func (m model) startEditTask() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Set up edit mode
-	m.editingTask = &selectedTask
+	// Set up edit mode - find actual task in config (not local copy)
+	for i := range m.config.Tasks {
+		if m.config.Tasks[i].ID == selectedTask.ID {
+			m.editingTask = &m.config.Tasks[i]
+			break
+		}
+	}
 	m.prevMode = m.mode
 	m.mode = editTaskView
 	m.formFocus = 0
@@ -1814,8 +1815,13 @@ func (m model) viewTaskDetail() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Set up detail view
-	m.editingTask = &selectedTask
+	// Set up detail view - find actual task in config (not local copy)
+	for i := range m.config.Tasks {
+		if m.config.Tasks[i].ID == selectedTask.ID {
+			m.editingTask = &m.config.Tasks[i]
+			break
+		}
+	}
 	m.prevMode = m.mode
 	m.mode = taskDetailView
 
@@ -1965,6 +1971,36 @@ func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case "e":
+		// Edit task - save notes first, then switch to edit mode
+		if m.editingTask != nil {
+			notes := strings.TrimSpace(m.notesTextarea.Value())
+			for i := range m.config.Tasks {
+				if m.config.Tasks[i].ID == m.editingTask.ID {
+					if m.config.Tasks[i].Notes != notes {
+						m.config.Tasks[i].Notes = notes
+						m.saveConfigAndMarkChanged()
+					}
+					break
+				}
+			}
+		}
+		m.notesTextarea.Blur()
+
+		// Transition to edit mode
+		m.mode = editTaskView
+		m.formFocus = 0
+
+		// Populate form fields with current task data
+		if m.editingTask != nil {
+			m.taskInputs[0].SetValue(m.editingTask.Content)
+			m.taskInputs[0].Focus()
+			m.taskInputs[1].SetValue(fmt.Sprintf("%d", m.editingTask.Priority))
+			m.taskInputs[1].Blur()
+		}
+
+		return m, textinput.Blink
 	}
 
 	m.notesTextarea, cmd = m.notesTextarea.Update(msg)
@@ -2129,7 +2165,7 @@ func (m model) renderTaskDetailView() string {
 	output.WriteString("\n\n")
 
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
-	output.WriteString(helpStyle.Render("ctrl+s: save notes | esc: save and return"))
+	output.WriteString(helpStyle.Render("e: edit task | ctrl+s: save notes | esc: save and return"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
 }
