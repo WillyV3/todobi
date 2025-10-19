@@ -1941,15 +1941,10 @@ func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Save notes before exiting
 		if m.editingTask != nil {
 			notes := strings.TrimSpace(m.notesTextarea.Value())
-			for i := range m.config.Tasks {
-				if m.config.Tasks[i].ID == m.editingTask.ID {
-					if m.config.Tasks[i].Notes != notes {
-						m.config.Tasks[i].Notes = notes
-						m.saveConfigAndMarkChanged()
-						m.setStatus("Notes saved")
-					}
-					break
-				}
+			if m.editingTask.Notes != notes {
+				m.editingTask.Notes = notes
+				m.saveConfigAndMarkChanged()
+				m.setStatus("Notes saved")
 			}
 		}
 		m.mode = m.prevMode
@@ -1961,14 +1956,9 @@ func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Manual save with Ctrl+S
 		if m.editingTask != nil {
 			notes := strings.TrimSpace(m.notesTextarea.Value())
-			for i := range m.config.Tasks {
-				if m.config.Tasks[i].ID == m.editingTask.ID {
-					m.config.Tasks[i].Notes = notes
-					m.saveConfigAndMarkChanged()
-					m.setStatus("Notes saved")
-					break
-				}
-			}
+			m.editingTask.Notes = notes
+			m.saveConfigAndMarkChanged()
+			m.setStatus("Notes saved")
 		}
 		return m, nil
 
@@ -1976,14 +1966,9 @@ func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Edit task - save notes first, then switch to edit mode
 		if m.editingTask != nil {
 			notes := strings.TrimSpace(m.notesTextarea.Value())
-			for i := range m.config.Tasks {
-				if m.config.Tasks[i].ID == m.editingTask.ID {
-					if m.config.Tasks[i].Notes != notes {
-						m.config.Tasks[i].Notes = notes
-						m.saveConfigAndMarkChanged()
-					}
-					break
-				}
+			if m.editingTask.Notes != notes {
+				m.editingTask.Notes = notes
+				m.saveConfigAndMarkChanged()
 			}
 		}
 		m.notesTextarea.Blur()
