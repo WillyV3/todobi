@@ -1972,7 +1972,7 @@ func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "e":
+	case "ctrl+e":
 		// Edit task - save notes first, then switch to edit mode
 		if m.editingTask != nil {
 			notes := strings.TrimSpace(m.notesTextarea.Value())
@@ -2165,7 +2165,7 @@ func (m model) renderTaskDetailView() string {
 	output.WriteString("\n\n")
 
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
-	output.WriteString(helpStyle.Render("e: edit task | ctrl+s: save notes | esc: save and return"))
+	output.WriteString(helpStyle.Render("ctrl+e: edit task | ctrl+s: save notes | esc: save and return"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
 }
