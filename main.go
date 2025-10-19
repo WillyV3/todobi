@@ -1455,12 +1455,11 @@ func (m model) View() string {
 	case editTaskView:
 		return m.renderEditTaskForm()
 	case taskDetailView:
-		base := m.renderTaskDetailView()
 		if m.showingSaveConfirm {
-			// Overlay confirmation prompt
-			return base + "\n\n" + m.renderSaveConfirm()
+			// Show fullscreen confirmation overlay
+			return m.renderSaveConfirm()
 		}
-		return base
+		return m.renderTaskDetailView()
 	case completedView:
 		return m.renderCompletedView()
 	case deleteConfirmView:
@@ -1698,22 +1697,34 @@ func (m model) renderPullConfirm() string {
 }
 
 func (m model) renderSaveConfirm() string {
-	warningStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#ffc107")).
-		Bold(true)
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#ffc107"))
 
-	promptStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#ffc107")).
-		Padding(1, 2)
+	infoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#d4d4d4"))
 
-	prompt := lipgloss.JoinVertical(lipgloss.Left,
-		warningStyle.Render("⚠ Unsaved changes!"),
+	optionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4ec9b0"))
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render("Unsaved Changes"),
 		"",
-		"Y: Save and exit  •  N: Discard  •  Esc: Cancel",
+		infoStyle.Render("You have unsaved changes to your notes."),
+		infoStyle.Render("What would you like to do?"),
+		"",
+		optionStyle.Render("Y: ")+"Save changes and exit",
+		optionStyle.Render("N: ")+"Discard changes and exit",
+		optionStyle.Render("Esc: ")+"Cancel and continue editing",
 	)
 
-	return promptStyle.Render(prompt)
+	dialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#ffc107")).
+		Padding(1, 2).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 }
 
 func (m model) renderFooter() string {
