@@ -217,16 +217,18 @@ type model struct {
 	categoryList     list.Model
 	taskToDelete     *Task
 	categoryToDelete *Category
-	editingCategory  *Category
-	editingTask      *Task
-	notesTextarea    textarea.Model
-	configChanged    bool
-	syncInProgress   bool
-	pullInProgress   bool
-	remoteConfig     *Config
-	spinner          spinner.Model
-	firstRunStep     firstRunStep
-	firstRunError    string
+	editingCategory    *Category
+	editingTask        *Task
+	notesTextarea      textarea.Model
+	showingSaveConfirm bool
+	originalNotes      string
+	configChanged      bool
+	syncInProgress     bool
+	pullInProgress     bool
+	remoteConfig       *Config
+	spinner            spinner.Model
+	firstRunStep       firstRunStep
+	firstRunError      string
 }
 
 func main() {
@@ -377,7 +379,11 @@ func saveConfig(cfg *Config) error {
 }
 
 func (m *model) saveConfigAndMarkChanged() {
-	saveConfig(m.config)
+	if err := saveConfig(m.config); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Failed to save config: %v\n", err)
+		m.setStatus("Error saving: " + err.Error())
+		return
+	}
 	m.configChanged = true
 }
 
@@ -1449,7 +1455,12 @@ func (m model) View() string {
 	case editTaskView:
 		return m.renderEditTaskForm()
 	case taskDetailView:
-		return m.renderTaskDetailView()
+		base := m.renderTaskDetailView()
+		if m.showingSaveConfirm {
+			// Overlay confirmation prompt
+			return base + "\n\n" + m.renderSaveConfirm()
+		}
+		return base
 	case completedView:
 		return m.renderCompletedView()
 	case deleteConfirmView:
@@ -1686,6 +1697,25 @@ func (m model) renderPullConfirm() string {
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
 }
 
+func (m model) renderSaveConfirm() string {
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffc107")).
+		Bold(true)
+
+	promptStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#ffc107")).
+		Padding(1, 2)
+
+	prompt := lipgloss.JoinVertical(lipgloss.Left,
+		warningStyle.Render("⚠ Unsaved changes!"),
+		"",
+		"Y: Save and exit  •  N: Discard  •  Esc: Cancel",
+	)
+
+	return promptStyle.Render(prompt)
+}
+
 func (m model) renderFooter() string {
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
@@ -1786,11 +1816,13 @@ func (m model) startEditTask() (tea.Model, tea.Cmd) {
 	m.mode = editTaskView
 	m.formFocus = 0
 
-	// Populate form fields with current task data
-	m.taskInputs[0].SetValue(selectedTask.Content)
-	m.taskInputs[0].Focus()
-	m.taskInputs[1].SetValue(fmt.Sprintf("%d", selectedTask.Priority))
-	m.taskInputs[1].Blur()
+	// Populate form fields with current task data from actual config (not list copy)
+	if m.editingTask != nil {
+		m.taskInputs[0].SetValue(m.editingTask.Content)
+		m.taskInputs[0].Focus()
+		m.taskInputs[1].SetValue(fmt.Sprintf("%d", m.editingTask.Priority))
+		m.taskInputs[1].Blur()
+	}
 
 	return m, textinput.Blink
 }
@@ -1825,8 +1857,12 @@ func (m model) viewTaskDetail() (tea.Model, tea.Cmd) {
 	m.prevMode = m.mode
 	m.mode = taskDetailView
 
-	// Initialize textarea with current notes
-	m.notesTextarea.SetValue(selectedTask.Notes)
+	// Initialize textarea with current notes from actual config task (not list copy)
+	if m.editingTask != nil {
+		m.notesTextarea.SetValue(m.editingTask.Notes)
+		m.originalNotes = m.editingTask.Notes // Track original for change detection
+	}
+	m.showingSaveConfirm = false // Reset confirmation state
 	m.notesTextarea.Focus()
 
 	return m, textarea.Blink
@@ -1934,19 +1970,52 @@ func (m model) handleTaskEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleTaskDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	switch msg.String() {
-	case "esc":
-		// Save notes before exiting
-		if m.editingTask != nil {
-			notes := strings.TrimSpace(m.notesTextarea.Value())
-			if m.editingTask.Notes != notes {
+	// If showing confirmation dialog, handle it separately
+	if m.showingSaveConfirm {
+		switch msg.String() {
+		case "y", "Y":
+			// Save and exit
+			if m.editingTask != nil {
+				notes := strings.TrimSpace(m.notesTextarea.Value())
 				m.editingTask.Notes = notes
 				m.saveConfigAndMarkChanged()
 				m.setStatus("Notes saved")
 			}
+			m.mode = m.prevMode
+			m.editingTask = nil
+			m.notesTextarea.Blur()
+			m.showingSaveConfirm = false
+			return m, nil
+
+		case "n", "N":
+			// Discard and exit
+			m.mode = m.prevMode
+			m.editingTask = nil
+			m.notesTextarea.Blur()
+			m.showingSaveConfirm = false
+			m.setStatus("Changes discarded")
+			return m, nil
+
+		case "esc", "c", "C":
+			// Cancel - continue editing
+			m.showingSaveConfirm = false
+			return m, nil
 		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+
+	switch msg.String() {
+	case "esc":
+		// Check for unsaved changes
+		notes := strings.TrimSpace(m.notesTextarea.Value())
+		if m.originalNotes != notes {
+			// Has unsaved changes - show inline confirmation
+			m.showingSaveConfirm = true
+			return m, nil
+		}
+		// No changes - exit directly
 		m.mode = m.prevMode
 		m.editingTask = nil
 		m.notesTextarea.Blur()
