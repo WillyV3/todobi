@@ -2164,7 +2164,15 @@ func (m model) renderTaskDetailView() string {
 	output.WriteString(m.notesTextarea.View())
 	output.WriteString("\n\n")
 
+	// Status message (if active)
+	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0")).Bold(true)
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+
+	if time.Now().Before(m.statusUntil) {
+		output.WriteString(statusStyle.Render("✓ " + m.statusMsg))
+		output.WriteString("  ")
+	}
+
 	output.WriteString(helpStyle.Render("ctrl+e: edit task | ctrl+s: save notes | esc: save and return"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(output.String())
