@@ -89,20 +89,15 @@ func (t TaskItem) Title() string {
 		Foreground(lipgloss.Color(t.Priority.Color())).
 		Bold(true)
 
-	categoryStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#666")).
-		Italic(true)
-
 	checkbox := "[ ]"
 	if t.Done {
 		checkbox = "[x]"
 	}
 
-	return fmt.Sprintf("%s %-4s %s %s",
+	return fmt.Sprintf("%s %-4s %s",
 		checkbox,
 		priorityStyle.Render(t.Priority.String()),
 		t.Content,
-		categoryStyle.Render(fmt.Sprintf("[%s]", t.CategoryName)),
 	)
 }
 
@@ -201,22 +196,22 @@ const (
 
 // Model is the Bubble Tea model
 type model struct {
-	config           *Config
-	width            int
-	height           int
-	mode             viewMode
-	prevMode         viewMode
-	ready            bool
-	statusMsg        string
-	statusUntil      time.Time
-	categoryInput    textinput.Model
-	taskInputs       []textinput.Model
-	formFocus        int
-	list             list.Model
-	completedList    list.Model
-	categoryList     list.Model
-	taskToDelete     *Task
-	categoryToDelete *Category
+	config             *Config
+	width              int
+	height             int
+	mode               viewMode
+	prevMode           viewMode
+	ready              bool
+	statusMsg          string
+	statusUntil        time.Time
+	categoryInput      textinput.Model
+	taskInputs         []textinput.Model
+	formFocus          int
+	list               list.Model
+	completedList      list.Model
+	categoryList       list.Model
+	taskToDelete       *Task
+	categoryToDelete   *Category
 	editingCategory    *Category
 	editingTask        *Task
 	notesTextarea      textarea.Model
@@ -229,6 +224,76 @@ type model struct {
 	spinner            spinner.Model
 	firstRunStep       firstRunStep
 	firstRunError      string
+	activeTabIndex     int    // 0 = "All", then index into categories array + 1
+	selectedCategoryID string // "" = "All", otherwise category ID
+}
+
+func (m *model) getCategoryTabNames() []string {
+	tabNames := []string{"All"}
+	for _, cat := range m.config.Categories {
+		tabNames = append(tabNames, cat.Name)
+	}
+	return tabNames
+}
+
+func (m model) renderTabs() string {
+	tabNames := m.getCategoryTabNames()
+	separator := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#333")).
+		Render("│")
+
+	// Render individual tabs
+	var renderedTabs []string
+	for i, tabName := range tabNames {
+		var style lipgloss.Style
+		if i == m.activeTabIndex {
+			style = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#4ec9b0")).
+				Bold(true).
+				Padding(0, 2)
+		} else {
+			style = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#666")).
+				Padding(0, 2)
+		}
+		renderedTabs = append(renderedTabs, style.Render(tabName))
+	}
+
+	// Wrap tabs to multiple lines based on width
+	var lines []string
+	var currentLine []string
+	currentWidth := 0
+	separatorWidth := lipgloss.Width(separator)
+
+	for _, tab := range renderedTabs {
+		tabWidth := lipgloss.Width(tab)
+		needsSeparator := len(currentLine) > 0
+
+		// Calculate width if we add this tab
+		addedWidth := tabWidth
+		if needsSeparator {
+			addedWidth += separatorWidth
+		}
+
+		// Check if adding this tab would exceed width
+		if currentWidth+addedWidth > m.width && len(currentLine) > 0 {
+			// Start new line
+			lines = append(lines, strings.Join(currentLine, separator))
+			currentLine = []string{tab}
+			currentWidth = tabWidth
+		} else {
+			// Add to current line
+			currentLine = append(currentLine, tab)
+			currentWidth += addedWidth
+		}
+	}
+
+	// Add remaining tabs
+	if len(currentLine) > 0 {
+		lines = append(lines, strings.Join(currentLine, separator))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func main() {
@@ -293,7 +358,7 @@ func main() {
 
 	// Initialize lists
 	m.list = list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
-	m.list.Title = "Tasks"
+	// m.list.Title = "Tasks"  // Removed - using tabs instead
 	m.list.SetShowStatusBar(false)
 	m.list.SetFilteringEnabled(false)
 
@@ -333,6 +398,10 @@ func main() {
 	m.spinner = spinner.New()
 	m.spinner.Spinner = spinner.Pulse
 	m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
+
+	// Initialize category tabs
+	m.activeTabIndex = 0      // Start with "All" tab
+	m.selectedCategoryID = "" // Start with "All" selected
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -484,7 +553,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = max(msg.Width, minWidth)
 		m.height = max(msg.Height, minHeight)
 
-		listHeight := m.height - 6
+		// Adjust list height to account for tabs (extra 2 lines for tabs + spacing)
+		listHeight := m.height - 8
 		m.list.SetSize(m.width, listHeight)
 		m.completedList.SetSize(m.width, listHeight)
 		m.categoryList.SetSize(m.width, listHeight)
@@ -583,6 +653,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePullConfirm(msg)
 		}
 
+		// Handle tab navigation in list view
+		if m.mode == listView || m.mode == completedView {
+			switch msg.String() {
+			case "tab":
+				return m.nextCategory()
+			case "shift+tab":
+				return m.prevCategory()
+			}
+		}
+
 		// Main view handling
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -673,6 +753,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m model) nextCategory() (tea.Model, tea.Cmd) {
+	currentIndex := m.getCategoryIndex()
+	nextIndex := (currentIndex + 1) % (len(m.config.Categories) + 1)
+	return m.selectCategoryByIndex(nextIndex)
+}
+
+func (m model) prevCategory() (tea.Model, tea.Cmd) {
+	currentIndex := m.getCategoryIndex()
+	totalTabs := len(m.config.Categories) + 1
+	prevIndex := (currentIndex - 1 + totalTabs) % totalTabs
+	return m.selectCategoryByIndex(prevIndex)
+}
+
+func (m model) getCategoryIndex() int {
+	if m.selectedCategoryID == "" {
+		return 0 // "All" is index 0
+	}
+	for i, cat := range m.config.Categories {
+		if cat.ID == m.selectedCategoryID {
+			return i + 1 // +1 because "All" is at index 0
+		}
+	}
+	return 0
+}
+
+func (m model) selectCategoryByIndex(index int) (tea.Model, tea.Cmd) {
+	m.activeTabIndex = index
+	if index == 0 {
+		m.selectedCategoryID = "" // "All"
+	} else if index-1 < len(m.config.Categories) {
+		m.selectedCategoryID = m.config.Categories[index-1].ID
+	}
+	m.updateLists()
+	return m, nil
+}
+
 func (m *model) updateLists() {
 	// Helper to find category name
 	getCategoryName := func(categoryID string) string {
@@ -688,6 +804,10 @@ func (m *model) updateLists() {
 	var activeTasks []TaskItem
 	for _, task := range m.config.Tasks {
 		if !task.Done {
+			// Filter by selected category if not "All"
+			if m.selectedCategoryID != "" && task.CategoryID != m.selectedCategoryID {
+				continue
+			}
 			activeTasks = append(activeTasks, TaskItem{
 				Task:         task,
 				CategoryName: getCategoryName(task.CategoryID),
@@ -713,6 +833,10 @@ func (m *model) updateLists() {
 	var completedTasks []TaskItem
 	for _, task := range m.config.Tasks {
 		if task.Done {
+			// Filter by selected category if not "All"
+			if m.selectedCategoryID != "" && task.CategoryID != m.selectedCategoryID {
+				continue
+			}
 			completedTasks = append(completedTasks, TaskItem{
 				Task:         task,
 				CategoryName: getCategoryName(task.CategoryID),
@@ -1478,6 +1602,17 @@ func (m model) View() string {
 func (m model) renderListView() string {
 	var output strings.Builder
 
+	// Render category tabs at top (with 4 lines reserved)
+	tabs := m.renderTabs()
+	tabLines := strings.Split(tabs, "\n")
+	output.WriteString(tabs)
+
+	// Pad to ensure 4 lines total for tabs area
+	for i := len(tabLines); i < 4; i++ {
+		output.WriteString("\n")
+	}
+
+	// Render task list
 	output.WriteString(m.list.View())
 	output.WriteString("\n")
 	output.WriteString(m.renderFooter())
@@ -1488,6 +1623,17 @@ func (m model) renderListView() string {
 func (m model) renderCompletedView() string {
 	var output strings.Builder
 
+	// Render category tabs at top (with 4 lines reserved)
+	tabs := m.renderTabs()
+	tabLines := strings.Split(tabs, "\n")
+	output.WriteString(tabs)
+
+	// Pad to ensure 4 lines total for tabs area
+	for i := len(tabLines); i < 4; i++ {
+		output.WriteString("\n")
+	}
+
+	// Render completed list
 	output.WriteString(m.completedList.View())
 	output.WriteString("\n")
 	output.WriteString(m.renderFooter())
@@ -1741,9 +1887,9 @@ func (m model) renderFooter() string {
 
 	var helpText string
 	if m.mode == completedView {
-		helpText = "v: back | i: details | x: reopen | d: delete | g: pull | G: push | q: quit"
+		helpText = "tab/shift+tab: categories | v: back | i: details | x: reopen | d: delete | q: quit"
 	} else {
-		helpText = "c: categories | C: new category | T: task | i: details | v: completed | x: done | d: delete | g: pull | G: push | q: quit"
+		helpText = "tab/shift+tab: categories | c: manage | C: new | T: task | v: completed | x: done | q: quit"
 	}
 
 	// Wrap help text to terminal width
