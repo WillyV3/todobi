@@ -359,6 +359,7 @@ func main() {
 	// Initialize lists
 	m.list = list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
 	// m.list.Title = "Tasks"  // Removed - using tabs instead
+	m.list.SetShowTitle(false) // Hide title since we're using tabs
 	m.list.SetShowStatusBar(false)
 	m.list.SetFilteringEnabled(false)
 
@@ -553,8 +554,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = max(msg.Width, minWidth)
 		m.height = max(msg.Height, minHeight)
 
-		// Adjust list height to account for tabs (extra 2 lines for tabs + spacing)
-		listHeight := m.height - 8
+		// Adjust list height to account for header (3 ASCII + 1 gray + 4 tabs + footer)
+		listHeight := m.height - 12
 		m.list.SetSize(m.width, listHeight)
 		m.completedList.SetSize(m.width, listHeight)
 		m.categoryList.SetSize(m.width, listHeight)
@@ -1602,6 +1603,31 @@ func (m model) View() string {
 func (m model) renderListView() string {
 	var output strings.Builder
 
+	// Add ASCII art header with lighter teal background
+	tealBgStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#2d7a7a")).
+		Foreground(lipgloss.Color("#a0e0e0")).
+		Width(m.width).
+		Align(lipgloss.Center)
+
+	asciiArt := []string{
+		"░▀█▀░█▀█░█▀▄░█▀█░█▀▄░▀█▀",
+		"░░█░░█░█░█░█░█░█░█▀▄░░█░",
+		"░░▀░░▀▀▀░▀▀░░▀▀▀░▀▀░░▀▀▀",
+	}
+
+	for _, line := range asciiArt {
+		output.WriteString(tealBgStyle.Render(line))
+		output.WriteString("\n")
+	}
+
+	// Add gray separator line
+	grayBgStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#333333")).
+		Width(m.width)
+	output.WriteString(grayBgStyle.Render(""))
+	output.WriteString("\n")
+
 	// Render category tabs at top (with 4 lines reserved)
 	tabs := m.renderTabs()
 	tabLines := strings.Split(tabs, "\n")
@@ -1622,6 +1648,31 @@ func (m model) renderListView() string {
 
 func (m model) renderCompletedView() string {
 	var output strings.Builder
+
+	// Add ASCII art header with lighter teal background
+	tealBgStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#2d7a7a")).
+		Foreground(lipgloss.Color("#a0e0e0")).
+		Width(m.width).
+		Align(lipgloss.Center)
+
+	asciiArt := []string{
+		"░▀█▀░█▀█░█▀▄░█▀█░█▀▄░▀█▀",
+		"░░█░░█░█░█░█░█░█░█▀▄░░█░",
+		"░░▀░░▀▀▀░▀▀░░▀▀▀░▀▀░░▀▀▀",
+	}
+
+	for _, line := range asciiArt {
+		output.WriteString(tealBgStyle.Render(line))
+		output.WriteString("\n")
+	}
+
+	// Add gray separator line
+	grayBgStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#333333")).
+		Width(m.width)
+	output.WriteString(grayBgStyle.Render(""))
+	output.WriteString("\n")
 
 	// Render category tabs at top (with 4 lines reserved)
 	tabs := m.renderTabs()
