@@ -89,9 +89,23 @@ func (t TaskItem) Title() string {
 		Foreground(lipgloss.Color(t.Priority.Color())).
 		Bold(true)
 
+	categoryStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#666")).
+		Italic(true)
+
 	checkbox := "[ ]"
 	if t.Done {
 		checkbox = "[x]"
+	}
+
+	// Show category name for completed tasks
+	if t.Done && t.CategoryName != "" {
+		return fmt.Sprintf("%s %-4s %s %s",
+			checkbox,
+			priorityStyle.Render(t.Priority.String()),
+			t.Content,
+			categoryStyle.Render("["+t.CategoryName+"]"),
+		)
 	}
 
 	return fmt.Sprintf("%s %-4s %s",
@@ -830,14 +844,10 @@ func (m *model) updateLists() {
 	}
 	m.list.SetItems(activeItems)
 
-	// Update completed tasks list
+	// Update completed tasks list (show ALL completed tasks regardless of category filter)
 	var completedTasks []TaskItem
 	for _, task := range m.config.Tasks {
 		if task.Done {
-			// Filter by selected category if not "All"
-			if m.selectedCategoryID != "" && task.CategoryID != m.selectedCategoryID {
-				continue
-			}
 			completedTasks = append(completedTasks, TaskItem{
 				Task:         task,
 				CategoryName: getCategoryName(task.CategoryID),
@@ -1938,7 +1948,14 @@ func (m model) renderFooter() string {
 
 	var helpText string
 	if m.mode == completedView {
-		helpText = "tab/shift+tab: categories | v: back | i: details | x: reopen | d: delete | q: quit"
+		completedCount := 0
+		for _, task := range m.config.Tasks {
+			if task.Done {
+				completedCount++
+			}
+		}
+		countInfo := fmt.Sprintf("Showing all %d completed tasks | ", completedCount)
+		helpText = countInfo + "v: back | i: details | x: reopen | d: delete | q: quit"
 	} else {
 		helpText = "tab/shift+tab: categories | c: manage | C: new | T: task | v: completed | x: done | q: quit"
 	}
